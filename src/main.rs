@@ -1,5 +1,25 @@
+mod ball;
+mod sprite;
+mod paddle;
+
 use wgpu as wg;
+use wg::util::DeviceExt;
 use glfw::Context;
+
+use glam::Vec2;
+use crate::sprite::Sprite;
+use crate::paddle::Paddle;
+
+const VERTICES: &[f32] = &[
+    -0.5, -0.5,
+    0.5, -0.5,
+    0.5, 0.5,
+    -0.5, 0.5,
+];
+const INDICES: &[u16] = &[
+    0, 1, 2,
+    2, 3, 0,
+];
 
 
 #[tokio::main(flavor = "current_thread")]
@@ -47,11 +67,32 @@ async fn main() {
     }, None).await.unwrap();
     surface.configure(&device, &config);
 
+    let sprite_layout = device.create_bind_group_layout(&wg::BindGroupLayoutDescriptor {
+        label: Some("Sprite Bind Group Layout"),
+        entries: &[
+            wg::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wg::ShaderStages::VERTEX,
+                ty: wg::BindingType::Buffer {
+                    ty: wg::BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            },
+        ],
+    });
+
     let module = device.create_shader_module(wg::include_wgsl!("shaders/game.wgsl"));
 
     let pipeline = device.create_render_pipeline(&wg::RenderPipelineDescriptor {
         label: Some("Pong game pipeline"),
-        layout: None,
+        layout: Some(&device.create_pipeline_layout(&wg::PipelineLayoutDescriptor {
+            label: Some("Pong game pipeline layout"),
+            bind_group_layouts: &[&sprite_layout],
+            push_constant_ranges: &[],
+        })),
+
         multiview: None,
         depth_stencil: None,
         multisample: Default::default(),
@@ -64,7 +105,15 @@ async fn main() {
         vertex: wg::VertexState {
             module: &module,
             entry_point: "vs_main",
-            buffers: &[],
+            buffers: &[wgpu::VertexBufferLayout {
+                step_mode: wgpu::VertexStepMode::Vertex,
+                array_stride: 2 * std::mem::size_of::<f32>() as u64,
+                attributes: &[wg::VertexAttribute {
+                    offset: 0,
+                    shader_location: 0,
+                    format: wg::VertexFormat::Float32x2,
+                }],
+            }],
         },
         fragment: Some(wg::FragmentState {
             module: &module,
@@ -88,6 +137,28 @@ async fn main() {
         }),
     });
 
+    let quad_vbo = device.create_buffer_init(&wg::util::BufferInitDescriptor {
+        label: Some("Quad vertex buffer"),
+        contents: bytemuck::cast_slice(VERTICES),
+        usage: wg::BufferUsages::VERTEX,
+    });
+    let quad_ibo = device.create_buffer_init(&wg::util::BufferInitDescriptor {
+        label: Some("Quad index buffer"),
+        contents: bytemuck::cast_slice(INDICES),
+        usage: wg::BufferUsages::INDEX,
+    });
+
+    let ball_sprite = Sprite::new(&device, &queue, Vec2::ZERO, Vec2::new(0.05, 0.05), &sprite_layout);
+    let mut ball = ball::Ball::new(ball_sprite, 2.0);
+    let paddle1_sprite = Sprite::new(&device, &queue, Vec2::new(-1.0, 0.0), Vec2::new(0.1, 0.35), &sprite_layout);
+    let mut paddle1 = Paddle::new(paddle1_sprite, 3.0);
+    let paddle2_sprite = Sprite::new(&device, &queue, Vec2::new(1.0, 0.0), Vec2::new(0.1, 0.35), &sprite_layout);
+    let mut paddle2 = Paddle::new(paddle2_sprite, 3.0);
+
+    let mut player1_score = 0;
+    let mut player2_score = 0;
+    let mut server = 1.0;
+    let mut time = glfw.get_time();
     while !window.should_close() {
         glfw.poll_events();
         for (_, event) in glfw::flush_messages(&events) {
@@ -95,8 +166,59 @@ async fn main() {
                 glfw::WindowEvent::Key(glfw::Key::Escape, _, glfw::Action::Press, _) => {
                     window.set_should_close(true)
                 }
+                glfw::WindowEvent::Key(glfw::Key::Space, _, glfw::Action::Press, _) => {
+                    server *= -1.0;
+                    ball.velocity = Vec2::new(1.0, 0.35) * server;
+                    ball.sprite.position = Vec2::ZERO;
+                }
+                glfw::WindowEvent::Key(glfw::Key::W, _, action, _) => {
+                    if action == glfw::Action::Press {
+                        paddle1.wish_dir.y += 1.0;
+                    } else if action == glfw::Action::Release {
+                        paddle1.wish_dir.y -= 1.0;
+                    }
+                }
+                glfw::WindowEvent::Key(glfw::Key::S, _, action, _) => {
+                    if action == glfw::Action::Press {
+                        paddle1.wish_dir.y += -1.0;
+                    } else if action == glfw::Action::Release {
+                        paddle1.wish_dir.y -= -1.0;
+                    }
+                }
+                glfw::WindowEvent::Key(glfw::Key::Up, _, action, _) => {
+                    if action == glfw::Action::Press {
+                        paddle2.wish_dir.y += 1.0;
+                    } else if action == glfw::Action::Release {
+                        paddle2.wish_dir.y -= 1.0;
+                    }
+                }
+                glfw::WindowEvent::Key(glfw::Key::Down, _, action, _) => {
+                    if action == glfw::Action::Press {
+                        paddle2.wish_dir.y += -1.0;
+                    } else if action == glfw::Action::Release {
+                        paddle2.wish_dir.y -= -1.0;
+                    }
+                }
                 _ => {}
             }
+        }
+        let dt = glfw.get_time() - time;
+        time = glfw.get_time();
+        paddle1.update(dt as f32, &queue);
+        paddle2.update(dt as f32, &queue);
+        ball.update(dt as f32, &queue, &[&paddle1, &paddle2]);
+
+        // check if a player scored
+        if ball.sprite.position.x <= -0.95 {
+            player2_score += 1;
+            ball.velocity = Vec2::ZERO;
+            ball.sprite.position = Vec2::ZERO;
+            println!("Player 1: {} - Player 2: {}", player1_score, player2_score);
+        } else if ball.sprite.position.x >= 0.95 {
+            player1_score += 1;
+            ball.velocity = Vec2::ZERO;
+            ball.sprite.position = Vec2::ZERO;
+            println!("Player 1: {} - Player 2: {}", player1_score, player2_score);
         }
 
         let swapchain = surface.get_current_texture().unwrap();
@@ -118,7 +240,17 @@ async fn main() {
                 })],
             });
             rpass.set_pipeline(&pipeline);
-            rpass.draw(0..3, 0..1);
+            rpass.set_vertex_buffer(0, quad_vbo.slice(..));
+            rpass.set_index_buffer(quad_ibo.slice(..), wg::IndexFormat::Uint16);
+
+            rpass.set_bind_group(0, &paddle1.sprite.group, &[]);
+            rpass.draw_indexed(0..INDICES.len() as u32, 0, 0..1);
+
+            rpass.set_bind_group(0, &paddle2.sprite.group, &[]);
+            rpass.draw_indexed(0..INDICES.len() as u32, 0, 0..1);
+
+            rpass.set_bind_group(0, &ball.sprite.group, &[]);
+            rpass.draw_indexed(0..INDICES.len() as u32, 0, 0..1);
         }
         queue.submit([encoder.finish()]);
         swapchain.present();
