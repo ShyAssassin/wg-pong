@@ -4,3 +4,7 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
+bytemuck = { version = "1.14.3", features = ["derive"] }
+futures = { version = "0.3.30", features = ["executor"] }
+wgpu = { version = "0.19.4", features = ["vulkan-portability"] }
+glfw = { version = "0.55.0", features = ["raw-window-handle-v0-6"] }
